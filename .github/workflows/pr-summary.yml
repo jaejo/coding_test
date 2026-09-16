@@ -1,0 +1,65 @@
+name: PR Summary Generator
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate PR Summary with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # 1. PR의 코드 변경점 추출
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD | head -n 3000)
+
+          if [ -z "$DIFF" ]; then
+            echo "No code changes detected."
+            exit 0
+          fi
+
+          # 2. 한국어 프롬프트 구성
+          PROMPT="당신은 시니어 개발자입니다. 아래 PR diff를 읽고 깔끔하게 한국어로 요약 코멘트를 작성해주세요.
+
+          ### 📋 변경 요약
+          - 핵심 요약 (1~2줄)
+          - 주요 변경 사항 (불릿 포인트)
+
+          [Git Diff]
+          $DIFF"
+
+          JSON_PAYLOAD=$(jq -n --arg text "$PROMPT" '{
+            contents: [{ parts: [{ text: $text }] }]
+          }')
+
+          # 3. Gemini API 직접 호출 (안내된 모델 지정)
+          API_URL="https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_API_KEY}"
+          RESPONSE=$(curl -s -X POST "$API_URL" -H "Content-Type: application/json" -d "$JSON_PAYLOAD")
+
+          # 4. 응답 본문 파싱
+          SUMMARY=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty')
+
+          if [ -z "$SUMMARY" ]; then
+            echo "API Response: $RESPONSE"
+            exit 1
+          fi
+
+          # 5. PR 코멘트 등록
+          COMMENT_BODY="### 🤖 AI PR 요약
+
+          $SUMMARY"
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT_BODY"
